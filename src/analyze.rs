@@ -1,6 +1,6 @@
 //! For my next trick, I'l turn a lockfile into dependency relations.
 //! Using nothing but this silly module!
-use crate::lock::{FlakeLock, InputRef, Locked};
+use crate::flake::lock::{FlakeLock, InputRef, Locked};
 use std::collections::BTreeMap;
 
 /// `deps` maps a version URL to the nodes that reference it; `reverse_deps` maps
@@ -112,7 +112,7 @@ pub fn extract_repo_identity(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lock::FlakeLock;
+    use crate::flake::lock::FlakeLock;
 
     fn load(data: &str) -> FlakeLock {
         serde_json::from_str(data).expect("failed to unmarshal lock")

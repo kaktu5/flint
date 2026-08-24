@@ -1,5 +1,5 @@
 mod analyze;
-mod lock;
+mod flake;
 mod output;
 mod updates;
 
@@ -7,7 +7,7 @@ use pound::Parse;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use lock::FlakeLock;
+use flake::lock::FlakeLock;
 use output::Options;
 
 /// Analyze flake.lock for duplicate inputs and check updates.

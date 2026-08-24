@@ -1,4 +1,4 @@
-use crate::lock::{FlakeLock, Locked, Node};
+use crate::flake::lock::{FlakeLock, Locked, Node};
 use serde::Deserialize;
 use std::thread;
 
@@ -43,7 +43,7 @@ pub fn check_updates(lock: &FlakeLock, verbose: bool) -> Result<UpdateResults, S
         let handles: Vec<_> = root_inputs
             .iter()
             .map(|(name, target)| {
-                use crate::lock::InputRef;
+                use crate::flake::lock::InputRef;
                 scope.spawn(move || match target {
                     InputRef::One(reference) => check_input_update(lock, name, reference, verbose),
                     InputRef::Follows(_) => UpdateStatus {
@@ -421,7 +421,7 @@ fn ls_remote(git_url: &str, git_ref: &str, verbose: bool) -> Result<String, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lock::Locked;
+    use crate::flake::lock::Locked;
 
     fn locked(kind: &str) -> Locked {
         Locked {
