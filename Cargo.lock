@@ -106,6 +106,7 @@ version = "1.0.0"
 dependencies = [
  "attohttpc",
  "git2",
+ "nixon",
  "pound",
  "serde",
  "serde_json",
@@ -362,6 +363,12 @@ dependencies = [
  "security-framework-sys",
  "tempfile",
 ]
+
+[[package]]
+name = "nixon"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cbc01ab3221f79cd97d781b3c237a864bb18d9a2bd4c2ef100ef2470db8be1aa"
 
 [[package]]
 name = "once_cell"

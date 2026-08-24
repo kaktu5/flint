@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 pub struct FlakeLock {
     #[serde(default)]
     pub nodes: BTreeMap<String, Node>,
+    #[serde(default)]
+    pub root: String,
 }
 
 #[derive(Debug, Default, Deserialize)]

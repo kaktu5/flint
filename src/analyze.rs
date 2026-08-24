@@ -1,7 +1,16 @@
 //! For my next trick, I'l turn a lockfile into dependency relations.
 //! Using nothing but this silly module!
 use crate::flake::lock::{FlakeLock, InputRef, Locked};
-use std::collections::BTreeMap;
+use crate::flake::nix::{AttrPath, FlakeNix, IgnorePattern};
+use serde::Serialize;
+use std::{collections::{BTreeMap, HashSet}, iter};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IgnoreWarning {
+    pub path: String,
+    pub line: usize,
+    pub column: usize,
+}
 
 /// `deps` maps a version URL to the nodes that reference it; `reverse_deps` maps
 /// a node name to the nodes referencing it. Both are BTreeMaps so output order
@@ -10,6 +19,7 @@ use std::collections::BTreeMap;
 pub struct Relations {
     pub deps: BTreeMap<String, Vec<String>>,
     pub reverse_deps: BTreeMap<String, Vec<String>>,
+    pub warnings: Vec<IgnoreWarning>,
 }
 
 /// The repository identity plus a `rev`/`narHash` query, uniquely keying a
@@ -52,26 +62,23 @@ pub fn repo_url(locked: &Locked) -> String {
     }
 }
 
-/// Build the dependency relations for a lockfile in a single pass, which is also
-/// what keeps circular references from looping forever.
-pub fn analyze_flake(lock: &FlakeLock) -> Relations {
-    let node_urls: BTreeMap<&str, String> = lock
-        .nodes
-        .iter()
-        .filter_map(|(name, node)| {
-            let url = flake_url(node.locked.as_ref()?);
-            (!url.is_empty()).then_some((name.as_str(), url))
-        })
-        .collect();
-
+pub fn analyze_flake(
+    nix: &FlakeNix,
+    lock: &FlakeLock
+) -> Result<Relations, String> {
     let mut deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut reverse_deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut encountered: HashSet<AttrPath> = HashSet::new();
 
     let mut record = |target: &str, referrer: &str| {
-        if let Some(url) = node_urls.get(target) {
-            deps.entry(url.clone())
-                .or_default()
-                .push(referrer.to_owned());
+        if let Some(url) = lock
+            .nodes
+            .get(target)
+            .and_then(|node| node.locked.as_ref())
+            .map(flake_url)
+            .filter(|url| !url.is_empty())
+        {
+            deps.entry(url).or_default().push(referrer.to_owned());
             reverse_deps
                 .entry(target.to_owned())
                 .or_default()
@@ -79,17 +86,109 @@ pub fn analyze_flake(lock: &FlakeLock) -> Relations {
         }
     };
 
-    for (name, node) in &lock.nodes {
-        let Some(inputs) = &node.inputs else { continue };
-        for target in inputs.values() {
-            match target {
-                InputRef::One(t) => record(t, name),
-                InputRef::Follows(path) => path.iter().for_each(|t| record(t, name)),
-            }
+    walk(
+        nix,
+        lock,
+        find_root(lock)?,
+        &mut Vec::new(),
+        &mut HashSet::new(),
+        &mut record,
+        &mut encountered,
+    );
+
+    Ok(Relations {
+        deps,
+        reverse_deps,
+        warnings: validate_ignores(nix, &encountered),
+    })
+}
+
+fn walk<'a>(
+    nix: &FlakeNix,
+    lock: &'a FlakeLock,
+    name: &'a str,
+    path: &mut AttrPath,
+    visited: &mut HashSet<&'a str>,
+    record: &mut impl FnMut(&str, &str),
+    encountered: &mut HashSet<AttrPath>,
+) {
+    if !visited.insert(name) {
+        return
+    }
+    let Some(node) = lock.nodes.get(name) else {
+        return
+    };
+    let Some(inputs) = &node.inputs else { return };
+
+    for (input_key, target_ref) in inputs {
+        path.push(input_key.clone());
+        encountered.insert(path.clone());
+
+        match target_ref {
+            InputRef::One(target_name) => {
+                if !nix.should_ignore(path) {
+                    record(target_name, name);
+                }
+                walk(nix, lock, target_name, path, visited, record, encountered);
+            },
+            InputRef::Follows(target_path) => {
+                for t in target_path {
+                    record(t, name);
+                }
+                if let Some(target_name) = target_path.first() {
+                    walk(nix, lock, target_name, path, visited, record, encountered);
+                }
+            },
+        }
+
+        path.pop();
+    }
+}
+
+fn find_root(lock: &FlakeLock) -> Result<&str, String> {
+    lock.nodes
+        .get_key_value(lock.root.as_str())
+        .map(|(name, _)| name.as_str())
+        .ok_or_else(|| format!("root node `{}` not found in flake.lock", lock.root))
+}
+
+fn validate_ignores(
+    nix: &FlakeNix,
+    encountered: &HashSet<AttrPath>
+) -> Vec<IgnoreWarning> {
+    let used: HashSet<(&str, &IgnorePattern)> = encountered
+        .iter()
+        .filter_map(|path| nix.find_ignore(path))
+        .collect();
+
+    nix.input_ignores
+        .iter()
+        .flat_map(|(root, patterns)| patterns.iter().map(move |pattern| (root, pattern)))
+        .filter(|entry| !used.contains(&(entry.0.as_str(), entry.1)))
+        .map(|(root, pattern)| {
+            let (line, column) = offset_to_line_col(&nix.src, pattern.offset);
+            let path = iter::once(root.as_str())
+                .chain(pattern.path.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join("/");
+            IgnoreWarning { path, line, column }
+        })
+        .collect()
+}
+
+fn offset_to_line_col(src: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut column = 1;
+    for ch in src[..offset.min(src.len())].chars() {
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
         }
     }
 
-    Relations { deps, reverse_deps }
+    (line, column)
 }
 
 /// Strip the version query from a URL, keeping a `?host=` parameter but cutting a
@@ -143,7 +242,7 @@ mod tests {
   "version": 7
 }
 "#;
-        let result = analyze_flake(&load(data));
+        let result = analyze_flake(&FlakeNix::default(), &load(data)).unwrap();
         assert_eq!(result.deps.len(), 1);
         let (url, aliases) = result.deps.iter().next().unwrap();
         assert_eq!(url, "github:NixOS/nixpkgs?rev=abcdef&narHash=sha256-abc");
@@ -166,13 +265,14 @@ mod tests {
       }
     },
     "foo": { "inputs": { "nixpkgs": "nixpkgs" } },
-    "bar": { "inputs": { "nixpkgs": "nixpkgs" } }
+    "bar": { "inputs": { "nixpkgs": "nixpkgs" } },
+    "root": { "inputs": { "foo": "foo", "bar": "bar" } }
   },
-  "root": "foo",
+  "root": "root",
   "version": 7
 }
 "#;
-        let result = analyze_flake(&load(data));
+        let result = analyze_flake(&FlakeNix::default(), &load(data)).unwrap();
         assert_eq!(result.deps.len(), 1);
         let (url, aliases) = result.deps.iter().next().unwrap();
         assert_eq!(url, "github:NixOS/nixpkgs?rev=abcdef&narHash=sha256-abc");
@@ -199,13 +299,14 @@ mod tests {
       }
     },
     "foo": { "inputs": { "nixpkgs": "nixpkgs" } },
-    "bar": { "inputs": { "nixpkgs": "nixpkgs2" } }
+    "bar": { "inputs": { "nixpkgs": "nixpkgs2" } },
+    "root": { "inputs": { "foo": "foo", "bar": "bar" } }
   },
-  "root": "foo",
+  "root": "root",
   "version": 7
 }
 "#;
-        let result = analyze_flake(&load(data));
+        let result = analyze_flake(&FlakeNix::default(), &load(data)).unwrap();
         assert_eq!(result.deps.len(), 2);
         assert_eq!(
             result.deps["github:NixOS/nixpkgs?rev=abcdef&narHash=sha256-abc"],
@@ -231,7 +332,7 @@ mod tests {
   "version": 7
 }
 "#;
-        let result = analyze_flake(&load(data));
+        let result = analyze_flake(&FlakeNix::default(), &load(data)).unwrap();
         assert_eq!(result.deps.len(), 3);
         assert_eq!(
             result.deps["github:example/baz?rev=baz123&narHash=sha256-baz"],
@@ -269,7 +370,7 @@ mod tests {
   "version": 7
 }
 "#;
-        let result = analyze_flake(&load(data));
+        let result = analyze_flake(&FlakeNix::default(), &load(data)).unwrap();
         assert_eq!(result.deps.len(), 6);
         for url in [
             "github:owner1/repo1?rev=github123&narHash=sha256-github",
@@ -300,7 +401,7 @@ mod tests {
   "version": 7
 }
 "#;
-        let result = analyze_flake(&load(data));
+        let result = analyze_flake(&FlakeNix::default(), &load(data)).unwrap();
         assert_eq!(result.deps.len(), 1);
         let (url, aliases) = result.deps.iter().next().unwrap();
         assert_eq!(
@@ -313,7 +414,7 @@ mod tests {
     #[test]
     fn edge_case_empty_inputs() {
         let data = r#"{ "nodes": { "root": {} }, "root": "root", "version": 7 }"#;
-        assert_eq!(analyze_flake(&load(data)).deps.len(), 0);
+        assert_eq!(analyze_flake(&FlakeNix::default(), &load(data)).unwrap().deps.len(), 0);
     }
 
     #[test]
@@ -325,7 +426,7 @@ mod tests {
   },
   "root": "root", "version": 7
 }"#;
-        assert_eq!(analyze_flake(&load(data)).deps.len(), 0);
+        assert_eq!(analyze_flake(&FlakeNix::default(), &load(data)).unwrap().deps.len(), 0);
     }
 
     #[test]
@@ -338,7 +439,7 @@ mod tests {
   },
   "root": "root", "version": 7
 }"#;
-        assert_eq!(analyze_flake(&load(data)).deps.len(), 2);
+        assert_eq!(analyze_flake(&FlakeNix::default(), &load(data)).unwrap().deps.len(), 2);
     }
 
     #[test]
@@ -347,7 +448,7 @@ mod tests {
   "nodes": { "root": { "inputs": { "nonexistent": "missing-node" } } },
   "root": "root", "version": 7
 }"#;
-        assert_eq!(analyze_flake(&load(data)).deps.len(), 0);
+        assert_eq!(analyze_flake(&FlakeNix::default(), &load(data)).unwrap().deps.len(), 0);
     }
 
     #[test]
@@ -360,7 +461,7 @@ mod tests {
   },
   "root": "root", "version": 7
 }"#;
-        assert_eq!(analyze_flake(&load(data)).deps.len(), 2);
+        assert_eq!(analyze_flake(&FlakeNix::default(), &load(data)).unwrap().deps.len(), 2);
     }
 
     #[test]

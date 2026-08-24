@@ -1,4 +1,4 @@
-use crate::analyze::extract_repo_identity;
+use crate::analyze::{extract_repo_identity, IgnoreWarning};
 use crate::updates::UpdateResults;
 use std::collections::{BTreeMap, BTreeSet};
 use yansi::Paint;
@@ -73,9 +73,25 @@ fn dependants_of(deps: &Deps) -> Deps {
         .collect()
 }
 
+fn format_ignore_warning(warn: &str, warning: &IgnoreWarning) -> String {
+    let IgnoreWarning { path, line, column } = warning;
+    format!(
+        "{warn} [flake.nix:{line}:{column}] flint-ignore `{path}` does not \
+         match any input in flake.lock"
+    )
+}
+
+fn print_ignore_warnings(warnings: &[IgnoreWarning]) {
+    let (_, warn, _, _) = icons();
+    for warning in warnings {
+        eprintln!("{}", format_ignore_warning(warn, warning).fixed(11).bold());
+    }
+}
+
 pub fn print_dependencies(
     deps: &Deps,
     reverse_deps: &Deps,
+    warnings: &[IgnoreWarning],
     options: &Options,
 ) -> Result<(), String> {
     validate_output_format(&options.output_format)?;
@@ -90,6 +106,7 @@ pub fn print_dependencies(
             "dependencies": deps,
             "reverse_dependencies": reverse_deps,
             "duplicates": duplicates,
+            "warnings": warnings,
         });
         let json = serde_json::to_string_pretty(&value)
             .map_err(|err| format!("error marshaling JSON output: {err}"))?;
@@ -102,6 +119,7 @@ pub fn print_dependencies(
         "plain" => plain_dependencies(deps.len(), &duplicates, &dependants, options),
         _ => pretty_dependencies(deps.len(), &duplicates, &dependants, options),
     }
+    print_ignore_warnings(warnings);
     Ok(())
 }
 
@@ -591,14 +609,14 @@ mod tests {
             output_format: "json".into(),
             ..Default::default()
         };
-        assert!(print_dependencies(&d, &rd, &valid).is_ok());
+        assert!(print_dependencies(&d, &rd, &[], &valid).is_ok());
 
         let invalid = Options {
             quiet: true,
             output_format: "bogus".into(),
             ..Default::default()
         };
-        let err = print_dependencies(&d, &rd, &invalid).unwrap_err();
+        let err = print_dependencies(&d, &rd, &[], &invalid).unwrap_err();
         assert!(
             err.contains("invalid output format 'bogus'"),
             "message: {err}"

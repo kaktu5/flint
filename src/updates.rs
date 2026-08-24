@@ -549,7 +549,7 @@ mod tests {
     #[test]
     fn missing_node_errors() {
         let lock: FlakeLock =
-            serde_json::from_str(r#"{ "nodes": { "root": { "inputs": {} } } }"#).unwrap();
+            serde_json::from_str(r#"{ "nodes": { "root": { "inputs": {} } }, "root": "root" }"#).unwrap();
         let update = check_input_update(&lock, "nonexistent", "missing", false);
         assert!(!update.error.is_empty());
     }
@@ -560,7 +560,7 @@ mod tests {
             r#"{ "nodes": {
                 "no-lock": { "original": { "owner": "someone", "repo": "something" } },
                 "root": { "inputs": { "no-lock": "no-lock" } }
-            } }"#,
+            }, "root": "root" }"#,
         )
         .unwrap();
         let update = check_input_update(&lock, "no-lock", "no-lock", false);

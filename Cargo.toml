@@ -10,6 +10,7 @@ license     = "MPL-2.0"
 [dependencies]
 attohttpc  = { version = "0.31.0", default-features = false, features = [ "tls-native" ] }
 git2       = { version = "0.21.0", default-features = false, features = [ "https" ] }
+nixon      = "0.1.0"
 pound      = "0.1.6"
 serde      = { version = "1.0.228", default-features = false, features = [ "derive", "alloc" ] }
 serde_json = { version = "1.0.150", default-features = false, features = [ "alloc" ] }
